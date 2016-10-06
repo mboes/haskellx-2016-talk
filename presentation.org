@@ -1,0 +1,316 @@
+#+TITLE: Haskell meets Java
+#+SUBTITLE: Or how I learned to stop worrying and embrace and extend
+#+AUTHOR: Mathieu Boespflug
+#+EMAIL: m@tweag.io
+
+#+OPTIONS: reveal_center:t reveal_progress:t reveal_history:nil reveal_control:nil
+#+OPTIONS: reveal_rolling_links:t reveal_keyboard:t reveal_overview:t num:nil
+#+OPTIONS: reveal_width:1200 reveal_height:800
+#+OPTIONS: toc:0
+#+OPTIONS: timestamp:nil
+#+REVEAL_EXTRA_CSS: ./local.css
+#+REVEAL_HLEVEL: 2
+#+REVEAL_MARGIN: 0.1
+#+REVEAL_MAX_SCALE: 2.5
+#+REVEAL_MIN_SCALE: 0.5
+#+REVEAL_PLUGINS: (highlight)
+#+REVEAL_ROOT: http://cdn.jsdelivr.net/reveal.js/3.0.0/
+#+REVEAL_THEME: white
+#+REVEAL_TRANS: cube
+
+* Inline the World
+#+ATTR_REVEAL: :frag roll-in
+inline-r
+
+#+ATTR_REVEAL: :frag roll-in
+\nbsp \nbsp \nbsp inline-c (+ language-c-inline)
+
+#+ATTR_REVEAL: :frag roll-in
+\nbsp \nbsp \nbsp \nbsp \nbsp \nbsp *inline-java*
+
+#+ATTR_REVEAL: :frag roll-in
+\nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp inline-python?
+
+#+ATTR_REVEAL: :frag roll-in
+\nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp \nbsp ...
+* Preamble
+#+BEGIN_SRC haskell
+{-# LANGUAGE DataKinds #-}                     {-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE FunctionalDependencies #-}        {-# LANGUAGE StaticPointers #-}
+{-# LANGUAGE GADTs #-}                         {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE MultiParamTypeClasses #-}         {-# LANGUAGE TypeFamilies #-}
+#+END_SRC
+* Don't reinvent the World
+** Numerical computing
+- BLAS implementations through the ages:
+  + Original BLAS code from Netlib (1960's): 40Kloc FORTRAN code.
+  + ATLAS BLAS kernels (1990's): 320-360Kloc C code.
+  + OpenBLAS/GotoBLAS kernels (2000's): 150Kloc C code, 1Mloc+ Assembly code.
+#+ATTR_REVEAL: :frag fade-in
+- Beware of the "*Ninja gap*" in numerical code.
+  + "Good" code vs "expert" hand-tuned code:
+    + *24x average*
+    + *53x worst case*
+    performance gap in representative benchmarks (Satish et al, 2012).
+** Distributed analytics
+- *Problem:* terabytes of data available, want to map or fold the same
+  function on each word.
+#+ATTR_REVEAL: :frag roll-in
+- *Down the rabbit hole we go...*
+  #+ATTR_REVEAL: :frag roll-in
+  + need some way to ship function to where the data lives,
+  #+ATTR_REVEAL: :frag roll-in
+  + need efficient wire protocol and high-performance
+    (de)serialization routines to communicate results,
+  #+ATTR_REVEAL: :frag roll-in
+  + need to handle failures and automatically rebalance load,
+  #+ATTR_REVEAL: :frag roll-in
+  + need to handle demand spikes and transparently provision more
+    resources if avaiable,
+  + ...
+  #+ATTR_REVEAL: :frag roll-in
+- *Or we can just use Apache Spark.* (or Hadoop, or SciDB, or ...)
+* Calling conventions
+#+attr_html: :width 800px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./callstack.svg]]
+* Approaches to interop
+** Transpile Haskell
+- This is the *GHCJS way*.
+- Huge engineering effort.
+  + Have to implement a *full transpiler* for all of Haskell to
+    JavaScript.
+    + Fortunately can just focus on Core.
+  + But what about all those primitives?
+  + *450+ primops* in GHC HEAD currently.
+  + Effectively have to *reimplement RTS*.
+#+ATTR_REVEAL: :frag roll-in
+- *Big win:* single target runtime environment.
+  + Might be more ubiquitous, have better runtime code specialization,
+    more complete FFI...
+#+ATTR_REVEAL: :frag roll-in
+- The game to watch: *rahulmutt/ghcvm - Haskell compiled to JVM bytecode*.
+** Transpilation
+#+attr_html: :width 1000px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./transpile.svg]]
+** Binary protocol
+#+ATTR_REVEAL: :frag roll-in
+- Make everything have the *same calling convention*:
+  1. serialize the function name,
+  2. serialize each argument one by one,
+  3. Pack into a message,
+  4. "send" the message to some remote message interpretation endpoint.
+#+ATTR_REVEAL: :frag roll-in
+- *Same wire format for identifying functions, arguments*. But each
+  language has to reinterpret canonical format into own native format.
+#+ATTR_REVEAL: :frag roll-in
+- Optimize the common case: intra-language calls can still use fast
+  path (no serialization).
+#+ATTR_REVEAL: :frag roll-in
+- Slow inter-language calls. But that's okay: for many use cases
+  inter-language calls are rare.
+#+ATTR_REVEAL: :frag roll-in
+- The canonical implementation of this idea:
+  *nh2/call-from-haskell-from-anything*.
+** Code blocks interacting via protocol
+#+attr_html: :width 1100px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./binaryprot.svg]]
+** Use the FFI, Luke!
+- Take a page from the Haskell'98 report:
+#+BEGIN_SRC haskell
+foreign import <somelanguage> foo :: Bar -> IO Baz
+#+END_SRC
+- Just need to implement ~<somelanguage>~ support somehow.
+
+#+ATTR_REVEAL: :frag roll-in :frag_idx 1
+*Option 1:* add knowledge of the ~<somelanguage>~ calling convention
+ to the compiler. No support for legacy compilers.
+#+ATTR_REVEAL: :frag roll-in :frag_idx 1
+- Problem: details of foreign calling convention often unknown / very
+  complex.
+#+REVEAL: split
+*Option 2:* Hope the foreign language knows about the C calling
+convention. Then can just call all foreign functions either directly
+or via C.
+- Advantages: fast foreign calls (only very marginally slower than
+  native Haskell calls), no compiler hacking.
+
+#+ATTR_REVEAL: :frag roll-in :frag_idx 1
+We chose *Option 2*, but we didn't want to write ~foreign import~.
+** TODO FFI diagram
+** From FFI bindings to inline foreign code
+#+ATTR_REVEAL: :frag roll-in
+- Start from a simple premise: writing bindings by hand is painful.
+  + too *low-level*, so need to also write wrappers
+  + *heavyweight*: need a binding before calling a function.
+  + monolithic binding libraries are *anti-modular*.
+#+ATTR_REVEAL: :frag roll-in
+- Historical approach: preprocessor tool generates bindings from
+  annotated Haskell.
+  + Problem: preprocessors are a pain to work with.
+#+ATTR_REVEAL: :frag roll-in
+- Preprocessors only necessary because primitive compiler support
+  intentionally bare.
+#+ATTR_REVEAL: :frag roll-in
+- Our solution: enable inline foreign calls. Push all the intelligence
+  in custom quasiquoters.
+* inline-java Hello World live coding
+* Sparkle demo (with code)
+* Architectural patterns
+** JAR as a universal package format
+- TODO diagram
+** Avoid marshalling costs
+- Vision: want foreign function calls to be as cheap as native calls
+  in the common case.
+
+#+BEGIN_SRC haskell
+map :: (a -> b) -> [a] -> b
+map f [] = []
+map f (x:xs) = f x : map f xs
+#+END_SRC
+
+- If ~f~ foreign and cheap, but expensive to call, then better
+  implement mapping in foreign code, not Haskell.
+** Have an explicit cost model
+- Don't make the same mistake as RPC systems (CORBA, SOAP, etc)!
+- In our case foreign calls /can/ be as efficient as native ones. But
+  sometimes need to switch between representations.
+  + Representation conversion = allocation + copy.
+- Costs should always be explicit.
+#+ATTR_REVEAL: :frag fade-in
+#+BEGIN_SRC haskell
+main :: IO ()
+main = do
+  message <- reflect "Hello World!"
+  [java| javax.swing.JOptionPanel.showMessageDialog(null, $message) |]
+#+END_SRC
+* Under the hood
+** Basic types
+#+BEGIN_SRC haskell
+-- Type of Java objects
+newtype J (a :: JType) = J (Ptr (J a))
+
+-- Type of Java types
+data JType = Class Symbol
+           | Iface Symbol
+           | Prim Symbol
+           | Array JType
+           | Void
+#+END_SRC
+#+ATTR_REVEAL: :frag fade-in
+#+BEGIN_SRC haskell
+jnull :: J a
+jnull = J nullPtr
+
+upcast :: IsReferenceType a => J a -> J ('Class "java.lang.Object")
+upcast = unsafeCast
+
+-- | Unsafe type cast. Should only be used to downcast.
+unsafeCast :: J a -> J b
+unsafeCast (J x) = J (castPtr x)
+#+END_SRC
+** Foreign.JNI
+- All interaction with the JVM via the JNI.
+#+BEGIN_SRC haskell
+type JObject = J ('Class "java.lang.Object")
+type JClass = J ('Class "java.lang.Class")
+
+withJVM :: [ByteString] -> IO () -> IO ()
+findClass :: JNI.String -> IO JClass
+getMethodID :: J ('Class "java.lang.Class")
+            -> JNI.String -- ^ method name
+            -> JNI.String -- ^ method signature (disamb overload)
+            -> IO JMethodID
+
+callObjectMethod  :: J a -> JMethodID -> [JValue] -> IO JObject
+callIntMethod     :: J a -> JMethodID -> [JValue] -> IO Int32
+callBooleanMethod :: J a -> JMethodID -> [JValue] -> IO Bool
+...
+#+END_SRC
+** Language.Java
+- Want to disambiguate method overloading using Haskell types.
+  + single ~call~ function that disambiguates return type and argument
+    type overloading.
+- Want to transparently cache class ID lookups.
+#+ATTR_REVEAL: :frag fade-in
+#+BEGIN_SRC haskell
+data JValue = JBoolean Bool
+            | JInt Int32
+            | ...
+            | forall a. SingI a => JObject (J a)
+
+class Cast b where
+  unsafeCast :: JValue -> b
+instance Cast (J a) where
+  unsafeCast (JObject o) = o
+  unsafeCast _ = throw $ DynamicCastError
+instance Cast Bool
+  unsafeCast (JBoolean x) = x
+  unsafeCast _ = throw $ DynamicCastError
+instance Cast Int32
+  unsafeCast (JInt x) = x
+  ...
+#+END_SRC
+** ~call~: the swiss army knife for calling Java methods
+- Want to disambiguate method overloading using Haskell types.
+  + single ~call~ function that disambiguates return type and argument
+    type overloading.
+- Want to transparently cache class ID lookups.
+#+BEGIN_SRC haskell
+call :: forall c b. (SingI c, Coercible b ty)
+     => J ('Class c)
+     -> JNI.String -- ^ Method name
+     -> [JValue] -- ^ Arguments
+     -> IO b
+call obj mname args = do
+    let argsings = map jtypeOf args
+        retsing = sing :: Sing ty
+    let klass = unsafePerformIO $
+                findClass (referenceTypeName (sing :: Sing ('Class c)))
+    method <- getMethodID klass mname (methodSignature args retsing)
+    case retsing of
+      SPrim "boolean" -> cast <$> JBoolean <$> callBooleanMethod obj method args
+      SPrim "int" -> cast <$> JByte <$> callByteMethod obj method args
+      ...
+      _ -> cast <$> JObject <$> callObjectMethod obj method args
+#+END_SRC
+** ~call~: the swiss army knife for calling Java methods
+- Want to disambiguate method overloading using Haskell types.
+  + single ~call~ function that disambiguates return type and argument
+    type overloading.
+- Want to transparently cache class ID lookups.
+#+BEGIN_SRC haskell
+klass = unsafePerformIO $
+        findClass (referenceTypeName (sing :: Sing ('Class "java.lang.Object")))
+
+call :: JObject
+     -> JNI.String -- ^ Method name
+     -> [JValue] -- ^ Arguments
+     -> IO b
+call obj mname args = do
+    let argsings = map jtypeOf args
+        retsing = sing :: Sing ty
+    method <- getMethodID klass mname (methodSignature args retsing)
+    case retsing of
+      SPrim "boolean" -> cast <$> JBoolean <$> callBooleanMethod obj method args
+      SPrim "int" -> cast <$> JByte <$> callByteMethod obj method args
+      ...
+      _ -> cast <$> JObject <$> callObjectMethod obj method args
+#+END_SRC
+** Generating wrappers
+** Reify/Reflect
+
+** Reify/Reflect functions.
+* Challenges
+** Garbage collection
+* Closing words
+- *High-performance* interop is not only possible but key to
+  modularity and making foreign functions first-class citizens of the
+  language.
+- Always make *costs explicit to the programmer* (true for networks,
+  true for interop).
+- Designed specifically to avoid compiler hacking, but in the end did
+  have to contribute a few patches to support this project. (thanks
+  Facundo!)
+
+- Code available on [[https://github.com/tweag/sparkle][Github: tweag/sparkle]].
+- email: [[mailto:m@tweag.io][m@tweag.io]] / twitter: [[https://twitter.com/mboesp][mboesp]]
