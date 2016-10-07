@@ -136,7 +136,9 @@ or via C.
 
 #+ATTR_REVEAL: :frag roll-in :frag_idx 1
 We chose *Option 2*, but we didn't want to write ~foreign import~.
-** TODO FFI diagram
+** C as a universal FFI
+#+attr_html: :width 800px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./ffi.svg]]
 ** From FFI bindings to inline foreign code
 #+ATTR_REVEAL: :frag roll-in
 - Start from a simple premise: writing bindings by hand is painful.
@@ -153,11 +155,18 @@ We chose *Option 2*, but we didn't want to write ~foreign import~.
 #+ATTR_REVEAL: :frag roll-in
 - Our solution: enable inline foreign calls. Push all the intelligence
   in custom quasiquoters.
-* inline-java Hello World live coding
-* Sparkle demo (with code)
+* Hello World! with inline-java
+* Sparkle demo
 * Architectural patterns
 ** JAR as a universal package format
-- TODO diagram
+#+attr_html: :width 900px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./jar.svg]]
+
+- JAR needs to be /self-contained/ (no external deps).
+- So ship all system shared libraries inside JAR.
+- Write a Java stub to dynamically load Haskell object code.
+  + The key trick: compile and link binary with ~-fPIE~.
+  + Makes binary look like any odd shared library.
 ** Avoid marshalling costs
 - Vision: want foreign function calls to be as cheap as native calls
   in the common case.
@@ -297,11 +306,93 @@ call obj mname args = do
       _ -> cast <$> JObject <$> callObjectMethod obj method args
 #+END_SRC
 ** Generating wrappers
+- Want to call not just named methods, but arbitrary inline code.
+- In general inline code mapped to static methods.
+  + body of method = text of quasiquote.
+  + arguments of method = antiquotation variables.
+#+ATTR_REVEAL: :frag fade-in :frag_idx 1
+#+BEGIN_SRC haskell
+main :: IO ()
+main = do
+  message <- reflect "Hello World!"
+  [java| javax.swing.JOptionPanel.showMessageDialog(null, $message) |]
+#+END_SRC
+#+ATTR_REVEAL: :frag fade-in :frag_idx 2
+Corresponding generated Java wrapper:
+#+ATTR_REVEAL: :frag fade-in :frag_idx 2
+#+BEGIN_SRC java
+public static void wrapper_ab123(String message) {
+    return javax.swing.JOptionPanel.showMessageDialog(null, $message);
+}
+#+END_SRC
+** Generating wrappers
+- Challenges:
+  + Don't want to pessimistically box all argruments and return values
+    in reference types (objects).
+  + Besides, wrapper needs to know exact type of arguments in order to
+    resolve method overloading properly.
+  + But, wrapper signature now depends on antiquote vars type, and
+    return type. Neither of which are known /a priori/.
+#+ATTR_REVEAL: :frag fade-in
+- Solution:
+  + at call site, use type class resolution to generate code that calls
+    Java wrapper with unboxed argruments.
+  + /Capture/ the call site's type environment.
+  + Use Template Haskell to register a module finalizer that will
+    generate the wrapper with the right signature once all the types are
+    fully determined /a posteriori/.
 ** Reify/Reflect
+#+BEGIN_SRC haskell
+-- | Extract a concrete Haskell value from the space of Java objects. That is to
+-- say, unmarshall a Java object to a Haskell value. Unlike coercing, in general
+-- reifying induces allocations and copies.
+class (SingI ty) => Reify a ty | a -> ty where
+  reify :: J ty -> IO a
 
+-- | Inject a concrete Haskell value into the space of Java objects. That is to
+-- say, marshall a Haskell value to a Java object. Unlike coercing, in general
+-- reflection induces allocations and copies.
+class (SingI ty) => Reflect a ty | a -> ty where
+  reflect :: a -> IO (J ty)
+#+END_SRC
 ** Reify/Reflect functions.
+#+BEGIN_SRC haskell
+type JFun1 a b =
+  'Generic ('face "org.apache.spark.api.java.function.Function") [a, b]
+
+instance ( Reflect a ty1, Reify b ty2)
+      => Reify (Closure (a -> b)) (JFun1 ty1 ty2) where
+  reify jobj = do
+      klass <- findClass "io/tweag/sparkle/function/HaskellFunction"
+      field <- getFieldID klass "clos" "[B"
+      jpayload <- getObjectField jobj field
+      payload <- reify (unsafeCast jpayload)
+      return (bs2clos payload)
+
+instance ( Reflect a ty1, Reify b ty2)
+      => Reify (Closure (a -> b)) (JFun1 ty1 ty2) where
+  reify jobj = do
+      klass <- findClass "io/tweag/sparkle/function/HaskellFunction"
+      field <- getFieldID klass "clos" "[B"
+      jpayload <- getObjectField jobj field
+      payload <- reify (unsafeCast jpayload)
+      return (bs2clos payload)
+
+instance ( Reify a ty1, Reflect b ty2)
+      => Reflect (Closure (a -> b)) (JFun1 ty1 ty2) where
+  reflect f = do
+      jpayload <- reflect (clos2bs wrap)
+      obj :: J ('Class "io.tweag.sparkle.function.HaskellFunction")
+        <- new [coerce jpayload]
+      return (unsafeCast obj)
+    where
+      wrap :: Closure (JObjectArray -> IO JObject)
+      wrap = ...
+#+END_SRC
 * Challenges
 ** Garbage collection
+#+attr_html: :width 800px
+\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp\nbsp[[./gc.png]]
 * Closing words
 - *High-performance* interop is not only possible but key to
   modularity and making foreign functions first-class citizens of the
